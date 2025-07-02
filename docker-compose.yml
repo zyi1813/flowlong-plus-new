@@ -1,0 +1,40 @@
+version: "3"
+
+services:
+  flowlong-plus-server:
+    image: 172.20.0.12:9002/library/flowlong-plus-server:${docker_tag}
+    container_name: flowlong-plus-server
+    restart: always
+    volumes:
+      - ./logs:/workdir/logs
+    networks:
+      - "flowlong_plus_network"
+    depends_on:
+      - redis
+  redis:
+    image: redis:7.0.5
+    container_name: flowlong-plus-redis
+    restart: always
+    networks:
+      - "flowlong_plus_network"
+    command: redis-server /etc/redis/redis.conf --appendonly yes
+    environment:
+      TZ: Asia/Shanghai
+      LANG: en_US.UTF-8
+    volumes:
+      - "./redis/data:/data"
+      - "./redis/config/redis.conf:/etc/redis/redis.conf"
+  frpc:
+    image: 172.20.0.12:9002/library/frpc:V0.51.3
+    container_name: flowlong-plus-frpc
+    restart: always
+    networks:
+      - flowlong_plus_network
+    volumes:
+      - "./frp/frpc.ini:/etc/frp/frpc.ini"
+    depends_on:
+      - "flowlong-plus-server"
+
+networks:
+  flowlong_plus_network:
+    driver: bridge
