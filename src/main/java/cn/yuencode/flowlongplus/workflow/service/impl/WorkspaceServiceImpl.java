@@ -15,6 +15,7 @@ import cn.yuencode.flowlongplus.mapper.FileDetailMapper;
 import cn.yuencode.flowlongplus.mapper.SysUserMapper;
 import cn.yuencode.flowlongplus.mapper.SysUserRoleMapper;
 import cn.yuencode.flowlongplus.util.page.PageResultConvert;
+import cn.yuencode.flowlongplus.workflow.config.WorkflowProperties;
 import cn.yuencode.flowlongplus.workflow.context.BusinessOperationContext;
 import cn.yuencode.flowlongplus.workflow.controller.req.*;
 import cn.yuencode.flowlongplus.workflow.controller.res.CcRes;
@@ -95,7 +96,7 @@ public class WorkspaceServiceImpl implements WorkspaceService {
     private final SysUserRoleMapper sysUserRoleMapper;
     private final FlowLongExecuteTaskService flowLongExecuteTaskService;
     private final ThreadPoolTaskExecutor taskExecutor;
-
+    private final WorkflowProperties workflowProperties;
     /**
      * 启动流程实例
      * 根据流程模板创建并启动一个新的流程实例
@@ -135,6 +136,14 @@ public class WorkspaceServiceImpl implements WorkspaceService {
             log.error("与流程引擎版本不一致");
             throw new CommonException("流程引擎版本不一致");
         }
+
+        // 验证发起人权限
+        NodeModel nodeConfig = flwProcess.model().getNodeConfig();
+        if (!hasInitiatorPermission(nodeConfig, loginId, sysUser)) {
+            log.error("用户:{} 没有权限发起此流程", sysUser.getNickname());
+            throw new CommonException("您没有权限发起此流程");
+        }
+
         // 开启流程
         flowLongEngine.startInstanceById(flwProcess.getId(), creator, startProcessReq.getVariable()).ifPresent(instance -> {
             // action记录
@@ -1097,9 +1106,9 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         flwHisInstanceMapper.updateById(histInstance);
         // 获取当前发起人节点的待办任务ID
         List<FlwTask> tasks = flwTaskMapper.selectList(
-            Wrappers.<FlwTask>lambdaQuery()
-                .eq(FlwTask::getInstanceId, instanceId)
-                .eq(FlwTask::getTaskKey, node.getNodeKey())
+                Wrappers.<FlwTask>lambdaQuery()
+                        .eq(FlwTask::getInstanceId, instanceId)
+                        .eq(FlwTask::getTaskKey, node.getNodeKey())
         );
         if (CollectionUtil.isEmpty(tasks)) {
             throw new CommonException("未找到发起人节点的待办任务");
@@ -1444,5 +1453,112 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         }
 
         return map;
+    }
+
+    /**
+     * 检查用户是否有发起流程的权限
+     *
+     * @param nodeModel 流程节点模型
+     * @param userId 用户ID
+     * @param sysUser 用户信息
+     * @return true 有权限，false 无权限
+     */
+    private boolean hasInitiatorPermission(NodeModel nodeModel, String userId, SysUser sysUser) {
+        // 超级管理员白名单直接放行
+        if (CollectionUtil.isNotEmpty(workflowProperties.getSuperAdminWhitelist()) && workflowProperties.getSuperAdminWhitelist().contains(userId)) {
+            return true;
+        }
+        // 递归查找发起人节点（type=0）
+        NodeModel initiatorNode = findInitiatorNode(nodeModel);
+        if (initiatorNode == null) {
+            // 没有找到发起人节点，默认所有人都有权限
+            return true;
+        }
+
+        List<NodeAssignee> nodeAssigneeList = initiatorNode.getNodeAssigneeList();
+        if (CollectionUtil.isEmpty(nodeAssigneeList)) {
+            // 发起人节点没有指定参与者，默认所有人都有权限
+            return true;
+        }
+
+        // 根据节点的setType判断参与者类型
+        Integer setType = initiatorNode.getSetType();
+        if (setType == null) {
+            // 如果没有设置setType，默认所有人都有权限
+            return true;
+        }
+
+        // 获取用户角色ID列表
+        List<String> userRoleIds = sysUserRoleMapper.selectList(
+                        Wrappers.<SysUserRole>lambdaQuery().eq(SysUserRole::getUserId, userId))
+                .stream()
+                .map(SysUserRole::getRoleId)
+                .collect(Collectors.toList());
+
+        // 获取用户部门ID
+        String userDeptId = sysUser.getDeptId();
+
+        // 检查用户是否在指定的参与者列表中
+        for (NodeAssignee assignee : nodeAssigneeList) {
+            String assigneeId = assignee.getId();
+
+            if (setType == 1) {
+                // 指定成员：直接匹配用户ID
+                if (Objects.equals(userId, assigneeId)) {
+                    return true;
+                }
+            } else if (setType == 3) {
+                // 角色：检查用户是否属于该角色
+                if (userRoleIds.contains(assigneeId)) {
+                    return true;
+                }
+            } else if (setType == 7) {
+                // 部门：检查用户是否属于该部门
+                if (Objects.equals(userDeptId, assigneeId)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 递归查找发起人节点
+     *
+     * @param nodeModel 节点模型
+     * @return 发起人节点，如果没找到返回null
+     */
+    private NodeModel findInitiatorNode(NodeModel nodeModel) {
+        if (nodeModel == null) {
+            return null;
+        }
+
+        // 检查当前节点是否为发起人节点
+        if (nodeModel.getType() != null && nodeModel.getType() == 0) {
+            return nodeModel;
+        }
+
+        // 递归检查子节点
+        if (nodeModel.getChildNode() != null) {
+            NodeModel childResult = findInitiatorNode(nodeModel.getChildNode());
+            if (childResult != null) {
+                return childResult;
+            }
+        }
+
+        // 递归检查条件节点
+        if (CollectionUtil.isNotEmpty(nodeModel.getConditionNodes())) {
+            for (ConditionNode conditionNode : nodeModel.getConditionNodes()) {
+                if (conditionNode.getChildNode() != null) {
+                    NodeModel childResult = findInitiatorNode(conditionNode.getChildNode());
+                    if (childResult != null) {
+                        return childResult;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 }

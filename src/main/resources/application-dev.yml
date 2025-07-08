@@ -36,3 +36,8 @@ sa-token:
   # 是否输出操作日志
   is-log: true
 
+#workflow:
+#  super-admin-whitelist:
+#    - "10003" # admin
+#    - "10040" # wangwu
+
